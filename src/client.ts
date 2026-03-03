@@ -120,6 +120,10 @@ export class AuthGuard {
             client_id: clientId,
         });
 
+        if (provider.clientSecret) {
+            body.set("client_secret", provider.clientSecret);
+        }
+
         if (provider.pkce_supported) {
             body.set("code_verifier", session.verifier);
         }
@@ -163,7 +167,7 @@ export class AuthGuard {
             profile,
             provider: session.provider,
         };
-  }
+    }
 
     private async fetchProfile(
         provider: OAuthProvider,

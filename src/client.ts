@@ -39,6 +39,7 @@ export class AuthGuard {
         this.handleRedirect = this.handleRedirect.bind(this);
         this.isCallback = this.isCallback.bind(this);
         this.getAuthTokenByCode = this.getAuthTokenByCode.bind(this);
+        this.refreshAuthToken = this.refreshAuthToken.bind(this);
     }
 
     private getProvider(id: ProviderId): OAuthProvider {
@@ -341,8 +342,8 @@ export class AuthGuard {
      * @param providerId The ID of the provider (e.g., 'dropbox')
      * @param refreshToken The refresh token stored from a previous sign-in
      */
-    async refreshToken(providerId: ProviderId, refreshToken: string): Promise<RefreshResult> {
-        
+    async refreshAuthToken(providerId: ProviderId, refreshToken: string): Promise<RefreshResult> {
+
         const provider = this.getProvider(providerId);
         const clientId = this.getClientId(provider);
 

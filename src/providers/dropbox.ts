@@ -5,7 +5,7 @@ const Dropbox = (options: OAuthProviderParams = {}) : OAuthProvider => ({
     authorization_url: "https://www.dropbox.com/oauth2/authorize",
     token_url: "https://api.dropboxapi.com/oauth2/token",
     user_info_url: "https://api.dropboxapi.com/2/users/get_current_account",
-    default_scopes: ["account_info.read"],
+    scopes: ["account_info.read"],
     pkce_supported: true,
     token_transport: "bearer",
     ...options,

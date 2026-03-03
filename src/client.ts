@@ -1,6 +1,6 @@
 import { generateChallenge, generateState, generateVerifier } from "./pkce";
 import { setupProvider } from "./providers";
-import { AuthConfig, AuthToken, NormalizedProfile, OAuthProvider, ProviderId, StoredPKCEState } from "./types";
+import { AuthConfig, AuthToken, NormalizedProfile, OAuthProvider, ProviderId, RefreshResult, StoredPKCEState } from "./types";
 
 const STORAGE_KEY_AUTH_STATE = "@zuzjs/auth:auth_state";
 const STORAGE_KEY_DISCOVERY_CACHE = "@zuzjs/auth:discovery";
@@ -66,7 +66,7 @@ export class AuthGuard {
 
     private resolveScopes(providerId: ProviderId, provider: OAuthProvider): string {
         const overrides = this.config.scopes?.[providerId];
-        const scopes = overrides ?? provider.default_scopes;
+        const scopes = overrides ?? provider.scopes;
         return scopes.join(" ");
     }
 
@@ -335,6 +335,45 @@ export class AuthGuard {
 
     }
 
+
+    /**
+     * Uses a refresh_token to acquire a new access_token without user interaction.
+     * @param providerId The ID of the provider (e.g., 'dropbox')
+     * @param refreshToken The refresh token stored from a previous sign-in
+     */
+    async refreshToken(providerId: ProviderId, refreshToken: string): Promise<RefreshResult> {
+        
+        const provider = this.getProvider(providerId);
+        const clientId = this.getClientId(provider);
+
+        const body = new URLSearchParams({
+            grant_type: "refresh_token",
+            refresh_token: refreshToken,
+            client_id: clientId,
+        });
+
+        // Note: Some providers (like GitHub) require client_secret for refreshes 
+        // if it's a private app, but for PKCE/Public clients, clientId is usually enough.
+        if (provider.clientSecret) {
+            body.set("client_secret", provider.clientSecret);
+        }
+
+        const response = await this.fetchJSON<RefreshResult>(
+            provider.token_url,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                },
+                body: body.toString(),
+            },
+            "TOKEN_REFRESH_FAILED"
+        );
+
+        return response;
+    }
+
     /**
      * Checks whether the current page load is an OAuth callback.
      * Useful for conditional rendering ("Loading…" vs normal page).
@@ -403,5 +442,5 @@ export class AuthGuard {
 
     }
 
-    
+
 }

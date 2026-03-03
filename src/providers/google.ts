@@ -5,9 +5,10 @@ const Google = (options: OAuthProviderParams = {}) : OAuthProvider => ({
     authorization_url: "https://accounts.google.com/o/oauth2/v2/auth",
     token_url: "https://oauth2.googleapis.com/token",
     user_info_url: "https://openidconnect.googleapis.com/v1/userinfo",
-    default_scopes: ["openid", "email", "profile"],
+    scopes: ["openid", "email", "profile"],
     pkce_supported: true,
     token_transport: "bearer",
+    ...options,
     normalizeProfile(raw) {
       return {
         id: String(raw.sub ?? raw.id ?? ""),

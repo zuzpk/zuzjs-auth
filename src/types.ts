@@ -12,7 +12,7 @@ export interface OAuthProvider extends OAuthProviderParams {
   /** Endpoint to fetch authenticated user's profile */
   user_info_url: string;
   /** Default scopes to request */
-  default_scopes: string[];
+  scopes: string[];
   /** Whether this provider supports PKCE (all modern providers do) */
   pkce_supported: boolean;
   /**
@@ -33,6 +33,7 @@ export interface OAuthProvider extends OAuthProviderParams {
 export interface OAuthProviderParams {
     clientId?: string;
     clientSecret?: string;
+    scopes?: string[];
 }
 
 export interface NormalizedProfile {
@@ -87,4 +88,11 @@ export interface AuthToken {
   scope: string | null;
   profile: NormalizedProfile | null;
   provider: ProviderId;
+}
+
+export interface RefreshResult {
+  access_token: string;
+  refresh_token?: string;
+  expires_in: number;
+  token_type: string;
 }

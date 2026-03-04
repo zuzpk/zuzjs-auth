@@ -1,6 +1,7 @@
 export * from "./providers"
 
 export type {
+    AuthToken,
     NormalizedProfile, OAuthProvider, ProviderId
 } from "./types"
 

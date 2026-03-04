@@ -71,9 +71,10 @@ export class AuthGuard {
         return scopes.join(" ");
     }
 
-    private saveSession(data: StoredPKCEState): void {
+    private saveSession(data: StoredPKCEState, returnTo?: string): void {
         try {
             sessionStorage.setItem(this.config.storageKey!, JSON.stringify(data));
+            if ( returnTo ) sessionStorage.setItem(`${this.config.storageKey!}-return-to`, returnTo);
         } catch {
         throw new AuthError(
             "Failed to write to sessionStorage. Ensure the browser allows storage.",
@@ -268,7 +269,7 @@ export class AuthGuard {
 
     }
 
-    async handleRedirect(): Promise<any> {
+    async handleRedirect(autoRedirect: boolean = false): Promise<any> {
 
         const params = new URLSearchParams(window.location.search);
         const code = params.get("code");
@@ -310,36 +311,47 @@ export class AuthGuard {
 
         const provider = this.getProvider(session.provider);
         const clientId = this.getClientId(provider);
+        
+        const returnTo = sessionStorage.getItem(`${this.config.storageKey!}-return-to`);
+        
+        let tokenSet : (AuthToken | { code: string; session: StoredPKCEState }) & {
+            returnTo: string | undefined
+        };
 
         if ( this.config.fetchTokenInfoOnServer === true ){
     
-            const tokenSet = await this.exchangeCode({
-                code,
-                session,
-                provider,
-                clientId,
-            });
+            tokenSet = {
+                ...(await this.exchangeCode({
+                    code,
+                    session,
+                    provider,
+                    clientId,
+                })),
+                returnTo: returnTo ?? undefined
+            };
 
-            this.clearSession()
-
-            return tokenSet
+            
 
         }
         else{
 
-            this.clearSession()
-
-            return {
+            tokenSet = {
                 code,
-                session
+                session,
+                returnTo: returnTo ?? undefined
             }
 
         }
-        
-        
+
+        this.clearSession()
+
+        if (returnTo && autoRedirect === true) {
+            window.location.href = window.location.origin + returnTo;
+        }
+
+        return tokenSet
 
     }
-
 
     /**
      * Uses a refresh_token to acquire a new access_token without user interaction.
@@ -395,15 +407,23 @@ export class AuthGuard {
     *
     * @param providerId - One of "google" | "dropbox" | "github"
     */
-    async signIn(providerId: ProviderId): Promise<any> {
+    async signIn(
+        providerId: ProviderId,
+        options?: {
+            returnTo?: string;
+        }
+    ): Promise<any> {
+
+        // Capture the current sub-path
+        const returnTo = options?.returnTo || window.location.pathname;
 
         const provider = this.getProvider(providerId);
         const clientId = this.getClientId(provider);
         
-        this.config.redirectUri = this.config.redirectUri || window.location.origin + window.location.pathname;
+        this.config.redirectUri = this.config.redirectUri || window.location.origin + `/zauth`
 
         // Generate CSRF state
-        const state = generateState();
+        const state = generateState()
 
         // PKCE
         const verifier = generateVerifier();
@@ -423,9 +443,17 @@ export class AuthGuard {
         }
 
         // Dropbox requires token_access_type for offline (refresh) tokens
-        if (providerId === "dropbox") {
-            params.token_access_type = "offline";
+        switch(providerId){
+            case "dropbox":
+                params.token_access_type = "offline";
+                break;
+            case "google":
+                params.access_type = "offline";
+                params.prompt = "consent";
+                break;
         }
+
+        // console.log(`--`, providerId, params)
 
         // Persist verifier + state before leaving the page
         this.saveSession({ 
@@ -433,7 +461,7 @@ export class AuthGuard {
             verifier, 
             state, 
             provider: providerId 
-        });
+        }, returnTo);
 
         // Build and navigate to the authorization URL
         const url = new URL(provider.authorization_url);

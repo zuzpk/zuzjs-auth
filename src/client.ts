@@ -1,6 +1,17 @@
 import { generateChallenge, generateState, generateVerifier } from "./pkce";
 import { setupProvider } from "./providers";
-import { AuthConfig, AuthToken, NormalizedProfile, OAuthProvider, ProviderId, RefreshResult, StoredPKCEState } from "./types";
+import {
+    AuthConfig,
+    AuthToken,
+    NormalizedProfile,
+    OAuthProvider,
+    ProviderId,
+    RefreshResult,
+    SignInAnonymouslyInput,
+    SignInWithEmailInput,
+    SignInWithPhoneInput,
+    StoredPKCEState,
+} from "./types";
 
 const STORAGE_KEY_AUTH_STATE = "@zuzjs/auth:auth_state";
 const STORAGE_KEY_DISCOVERY_CACHE = "@zuzjs/auth:discovery";
@@ -40,6 +51,9 @@ export class AuthGuard {
         this.isCallback = this.isCallback.bind(this);
         this.getAuthTokenByCode = this.getAuthTokenByCode.bind(this);
         this.refreshAuthToken = this.refreshAuthToken.bind(this);
+        this.signInWithEmail = this.signInWithEmail.bind(this);
+        this.signInAnonymously = this.signInAnonymously.bind(this);
+        this.signInWithPhone = this.signInWithPhone.bind(this);
     }
 
     private getProvider(id: ProviderId): OAuthProvider {
@@ -69,6 +83,41 @@ export class AuthGuard {
         const overrides = this.config.scopes?.[providerId];
         const scopes = overrides ?? provider.scopes;
         return scopes.join(" ");
+    }
+
+    private requireEndpoint(value: string | undefined, name: string, providerName: string): string {
+        if (!value) {
+            throw new AuthError(
+                `${name} is required for provider ${providerName}.`,
+                "MISSING_PROVIDER_ENDPOINT"
+            );
+        }
+        return value;
+    }
+
+    private parseTokenResponse(tokenResponse: Record<string, unknown>): Omit<AuthToken, "profile" | "provider"> {
+        const access_token = tokenResponse.access_token as string | undefined;
+        if (!access_token) {
+            throw new AuthError(
+                "Token exchange succeeded but no access_token was returned.",
+                "NO_ACCESS_TOKEN"
+            );
+        }
+
+        return {
+            access_token,
+            refresh_token: (tokenResponse.refresh_token as string) ?? null,
+            expires_in: (tokenResponse.expires_in as number) ?? null,
+            token_type: (tokenResponse.token_type as string) ?? "Bearer",
+            scope: (tokenResponse.scope as string) ?? null,
+        };
+    }
+
+    private async fetchProfileIfAvailable(provider: OAuthProvider, accessToken: string): Promise<NormalizedProfile | null> {
+        if (!provider.user_info_url) {
+            return null;
+        }
+        return this.fetchProfile(provider, accessToken);
     }
 
     private saveSession(data: StoredPKCEState, returnTo?: string): void {
@@ -114,6 +163,8 @@ export class AuthGuard {
 
         const { code, session, provider, clientId } = opts;
 
+        const tokenUrl = this.requireEndpoint(provider.token_url, "token_url", provider.name);
+
         const body = new URLSearchParams({
             grant_type: "authorization_code",
             code,
@@ -129,8 +180,14 @@ export class AuthGuard {
             body.set("code_verifier", session.verifier);
         }
 
+        if (provider.tokenParams) {
+            Object.entries(provider.tokenParams).forEach(([key, value]) => {
+                body.set(key, value);
+            });
+        }
+
         const tokenResponse = await this.fetchJSON<Record<string, unknown>>(
-            provider.token_url,
+            tokenUrl,
             {
                 method: "POST",
                 headers: {
@@ -143,28 +200,13 @@ export class AuthGuard {
             "TOKEN_EXCHANGE_FAILED"
         );
 
-        const access_token = tokenResponse.access_token as string | undefined;
-        if (!access_token) {
-            throw new AuthError(
-                "Token exchange succeeded but no access_token was returned.",
-                "NO_ACCESS_TOKEN"
-            );
-        }
-
-        const refresh_token = (tokenResponse.refresh_token as string) ?? null;
-        const expires_in = (tokenResponse.expires_in as number) ?? null;
-        const token_type = (tokenResponse.token_type as string) ?? "Bearer";
-        const scope = (tokenResponse.scope as string) ?? null;
+        const parsed = this.parseTokenResponse(tokenResponse);
 
         // Fetch user profile
-        const profile = await this.fetchProfile(provider, access_token);
+        const profile = await this.fetchProfileIfAvailable(provider, parsed.access_token);
 
         return {
-            access_token,
-            refresh_token,
-            expires_in,
-            token_type,
-            scope,
+            ...parsed,
             profile,
             provider: session.provider,
         };
@@ -315,7 +357,8 @@ export class AuthGuard {
         const returnTo = sessionStorage.getItem(`${this.config.storageKey!}-return-to`);
         
         let tokenSet : (AuthToken | { code: string; session: StoredPKCEState }) & {
-            returnTo: string | undefined
+            returnTo: string | undefined;
+            metaTag: string | undefined;
         };
 
         if ( this.config.fetchTokenInfoOnServer === true ){
@@ -327,10 +370,9 @@ export class AuthGuard {
                     provider,
                     clientId,
                 })),
-                returnTo: returnTo ?? undefined
+                returnTo: returnTo ?? undefined,
+                metaTag: session.metaTag ?? undefined
             };
-
-            
 
         }
         else{
@@ -338,7 +380,8 @@ export class AuthGuard {
             tokenSet = {
                 code,
                 session,
-                returnTo: returnTo ?? undefined
+                returnTo: returnTo ?? undefined,
+                metaTag: session.metaTag ?? undefined
             }
 
         }
@@ -362,6 +405,7 @@ export class AuthGuard {
 
         const provider = this.getProvider(providerId);
         const clientId = this.getClientId(provider);
+        const tokenUrl = this.requireEndpoint(provider.token_url, "token_url", provider.name);
 
         const body = new URLSearchParams({
             grant_type: "refresh_token",
@@ -375,8 +419,14 @@ export class AuthGuard {
             body.set("client_secret", provider.clientSecret);
         }
 
+        if (provider.tokenParams) {
+            Object.entries(provider.tokenParams).forEach(([key, value]) => {
+                body.set(key, value);
+            });
+        }
+
         const response = await this.fetchJSON<RefreshResult>(
-            provider.token_url,
+            tokenUrl,
             {
                 method: "POST",
                 headers: {
@@ -400,17 +450,130 @@ export class AuthGuard {
         return url.searchParams.has("code") || url.searchParams.has("error");
     }
 
+    async signInWithEmail(input: SignInWithEmailInput): Promise<AuthToken> {
+        const provider = this.getProvider(input.providerId);
+        const clientId = this.getClientId(provider);
+        const tokenUrl = this.requireEndpoint(provider.token_url, "token_url", provider.name);
+
+        const usernameField = provider.usernameField ?? "username";
+        const passwordField = provider.passwordField ?? "password";
+
+        const body = new URLSearchParams({
+            grant_type: provider.passwordGrantType ?? "password",
+            client_id: clientId,
+            [usernameField]: input.email,
+            [passwordField]: input.password,
+        });
+
+        const scope = input.scope?.join(" ") ?? this.resolveScopes(input.providerId, provider);
+        if (scope) {
+            body.set("scope", scope);
+        }
+
+        if (provider.clientSecret) {
+            body.set("client_secret", provider.clientSecret);
+        }
+
+        if (provider.tokenParams) {
+            Object.entries(provider.tokenParams).forEach(([key, value]) => {
+                body.set(key, value);
+            });
+        }
+
+        const tokenResponse = await this.fetchJSON<Record<string, unknown>>(
+            tokenUrl,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    Accept: "application/json",
+                },
+                body: body.toString(),
+            },
+            "EMAIL_SIGNIN_FAILED"
+        );
+
+        const parsed = this.parseTokenResponse(tokenResponse);
+        const profile = await this.fetchProfileIfAvailable(provider, parsed.access_token);
+
+        return {
+            ...parsed,
+            profile,
+            provider: input.providerId,
+        };
+    }
+
+    async signInAnonymously(input: SignInAnonymouslyInput): Promise<AuthToken> {
+        const provider = this.getProvider(input.providerId);
+        const clientId = this.getClientId(provider);
+        const tokenUrl = this.requireEndpoint(provider.token_url, "token_url", provider.name);
+
+        const body = new URLSearchParams({
+            grant_type: provider.anonymousGrantType ?? "client_credentials",
+            client_id: clientId,
+        });
+
+        const scope = input.scope?.join(" ") ?? this.resolveScopes(input.providerId, provider);
+        if (scope) {
+            body.set("scope", scope);
+        }
+
+        if (provider.clientSecret) {
+            body.set("client_secret", provider.clientSecret);
+        }
+
+        if (provider.tokenParams) {
+            Object.entries(provider.tokenParams).forEach(([key, value]) => {
+                body.set(key, value);
+            });
+        }
+
+        const tokenResponse = await this.fetchJSON<Record<string, unknown>>(
+            tokenUrl,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    Accept: "application/json",
+                },
+                body: body.toString(),
+            },
+            "ANONYMOUS_SIGNIN_FAILED"
+        );
+
+        const parsed = this.parseTokenResponse(tokenResponse);
+        const profile = await this.fetchProfileIfAvailable(provider, parsed.access_token);
+
+        return {
+            ...parsed,
+            profile,
+            provider: input.providerId,
+        };
+    }
+
+    async signInWithPhone(_input: SignInWithPhoneInput): Promise<never> {
+        throw new AuthError(
+            "Phone sign-in is not implemented in @zuzjs/auth because OTP verification requires a trusted backend (SMS provider secrets, rate-limits, replay protection, and fraud checks). Use your backend to verify OTP and return OAuth-style tokens, then consume them in your app.",
+            "PHONE_AUTH_REQUIRES_BACKEND"
+        );
+    }
+
     /**
     * Initiates the OAuth2 sign-in flow for the given provider.
     * Generates PKCE verifier + challenge, stores them in sessionStorage,
     * then redirects the browser to the provider's authorization URL.
     *
-    * @param providerId - One of "google" | "dropbox" | "github"
+    * @param providerId - One of the configured provider IDs (e.g., 'google', 'facebook')
+    * @param options - Optional parameters, e.g. { returnTo: "/app" }
+    *                  returnTo is the path within your app to return to after sign-in
     */
     async signIn(
         providerId: ProviderId,
         options?: {
+            /** The path within your app to return to after sign-in */
             returnTo?: string;
+            /** Optional meta tag to include in the sign-in request */
+            metaTag?: string;
         }
     ): Promise<any> {
 
@@ -418,6 +581,7 @@ export class AuthGuard {
         const returnTo = options?.returnTo || window.location.pathname;
 
         const provider = this.getProvider(providerId);
+        const authorizationUrl = this.requireEndpoint(provider.authorization_url, "authorization_url", provider.name);
         const clientId = this.getClientId(provider);
         
         this.config.redirectUri = this.config.redirectUri || window.location.origin + `/zauth`
@@ -453,6 +617,12 @@ export class AuthGuard {
                 break;
         }
 
+        if (provider.authorizationParams) {
+            Object.entries(provider.authorizationParams).forEach(([key, value]) => {
+                params[key] = value;
+            });
+        }
+
         // console.log(`--`, providerId, params)
 
         // Persist verifier + state before leaving the page
@@ -460,16 +630,18 @@ export class AuthGuard {
             redirectUri: this.config.redirectUri,
             verifier, 
             state, 
-            provider: providerId 
+            provider: providerId,
+            metaTag: options?.metaTag ?? ``,
         }, returnTo);
 
         // Build and navigate to the authorization URL
-        const url = new URL(provider.authorization_url);
+        const url = new URL(authorizationUrl);
         for (const [key, value] of Object.entries(params)) {
             url.searchParams.set(key, value);
         }
 
         // This function never returns — the browser navigates away.
+        // console.log(options)
         window.location.href = url.toString();
         throw new AuthError("Navigation should have occurred.", "NAVIGATION_FAILED");
 

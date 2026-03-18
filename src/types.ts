@@ -28,6 +28,18 @@ export interface OAuthProvider extends OAuthProviderParams {
   normalizeProfile?: (raw: Record<string, unknown>) => NormalizedProfile;
   clientId?: string;
   clientSecret?: string;
+  /** Optional additional query params added during authorization redirect */
+  authorizationParams?: Record<string, string>;
+  /** Optional additional form params added during token exchange */
+  tokenParams?: Record<string, string>;
+  /** Grant type to use for direct email/password sign-in. Defaults to "password". */
+  passwordGrantType?: string;
+  /** Field name used for the email/username value in password grant body. Defaults to "username". */
+  usernameField?: string;
+  /** Field name used for the password value in password grant body. Defaults to "password". */
+  passwordField?: string;
+  /** Grant type used for anonymous sign-in. Defaults to "client_credentials". */
+  anonymousGrantType?: string;
 } 
 
 export interface OAuthProviderParams {
@@ -73,11 +85,29 @@ export interface AuthConfig {
 
 }
 
+export interface SignInWithEmailInput {
+  providerId: ProviderId;
+  email: string;
+  password: string;
+  scope?: string[];
+}
+
+export interface SignInAnonymouslyInput {
+  providerId: ProviderId;
+  scope?: string[];
+}
+
+export interface SignInWithPhoneInput {
+  phoneNumber: string;
+  code?: string;
+}
+
 export interface StoredPKCEState {
   verifier: string;
   state: string;
   provider: ProviderId;
   redirectUri: string;
+  metaTag: string;
 }
 
 export interface AuthToken {

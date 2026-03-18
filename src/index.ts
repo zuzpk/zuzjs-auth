@@ -2,7 +2,12 @@ export * from "./providers"
 
 export type {
     AuthToken,
-    NormalizedProfile, OAuthProvider, ProviderId
+    NormalizedProfile,
+    OAuthProvider,
+    ProviderId,
+    SignInAnonymouslyInput,
+    SignInWithEmailInput,
+    SignInWithPhoneInput
 } from "./types"
 
 export {

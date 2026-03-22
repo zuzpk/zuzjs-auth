@@ -3,12 +3,13 @@ import { setupProvider } from "./providers";
 import {
     AuthConfig,
     AuthToken,
+    CreateUserWithEmailAndPasswordInput,
     NormalizedProfile,
     OAuthProvider,
     ProviderId,
     RefreshResult,
     SignInAnonymouslyInput,
-    SignInWithEmailInput,
+    SignInWithEmailAndPasswordInput,
     SignInWithPhoneInput,
     StoredPKCEState,
 } from "./types";
@@ -20,7 +21,8 @@ export class AuthError extends Error {
   constructor(
     message: string,
     public readonly code: string,
-    public readonly cause?: unknown
+        public readonly cause?: unknown,
+        public readonly status?: number
   ) {
     super(message);
     this.name = "AuthError";
@@ -51,7 +53,8 @@ export class AuthGuard {
         this.isCallback = this.isCallback.bind(this);
         this.getAuthTokenByCode = this.getAuthTokenByCode.bind(this);
         this.refreshAuthToken = this.refreshAuthToken.bind(this);
-        this.signInWithEmail = this.signInWithEmail.bind(this);
+        this.signInWithEmailAndPassword = this.signInWithEmailAndPassword.bind(this);
+        this.createUserWithEmailAndPassword = this.createUserWithEmailAndPassword.bind(this);
         this.signInAnonymously = this.signInAnonymously.bind(this);
         this.signInWithPhone = this.signInWithPhone.bind(this);
     }
@@ -260,54 +263,128 @@ export class AuthGuard {
     ): Promise<T> {
         let response: Response;
         try {
-        response = await fetch(url, init);
+            response = await fetch(url, init);
         } catch (networkErr) {
-        throw new AuthError(
-            `Network request failed: ${url}`,
-            errorCode,
-            networkErr
-        );
+            const reason = networkErr instanceof Error ? networkErr.message : "Unknown network error";
+            const networkHint = this.getNetworkHint(reason);
+            throw new AuthError(
+                `Network request failed for ${url}. ${networkHint}`,
+                errorCode,
+                networkErr
+            );
         }
 
         if (!response.ok) {
-        let body = "(no body)";
-        try {
-            body = await response.text();
-        } catch {
-            /* ignore */
+            let body = "";
+            try {
+                body = await response.text();
+            } catch {
+                /* ignore */
+            }
+
+            const bodyMessage = this.getResponseMessage(body);
+            const statusHint = this.getHttpStatusHint(response.status);
+            const detail = bodyMessage ? ` ${bodyMessage}` : "";
+            const hint = statusHint ? ` ${statusHint}` : "";
+            throw new AuthError(
+                `Request failed (${response.status} ${response.statusText}) for ${url}.${detail}${hint}`,
+                errorCode,
+                undefined,
+                response.status
+            );
         }
-        throw new AuthError(
-            `HTTP ${response.status} from ${url}: ${body}`,
-            errorCode
-        );
+
+        if (response.status === 204) {
+            return {} as T;
         }
 
         try {
-        return (await response.json()) as T;
+            return (await response.json()) as T;
         } catch (parseErr) {
-        throw new AuthError(
-            `Failed to parse JSON response from ${url}`,
-            errorCode,
-            parseErr
-        );
+            const text = await response.text().catch(() => "");
+            const snippet = text ? ` Response body: ${text.slice(0, 240)}` : "";
+            throw new AuthError(
+                `Failed to parse JSON response from ${url}.${snippet}`,
+                errorCode,
+                parseErr
+            );
         }
+    }
+
+    private getNetworkHint(reason: string): string {
+        const normalized = reason.toLowerCase();
+        if (normalized.includes("failed to fetch") || normalized.includes("networkerror")) {
+            return "This is usually a CORS, DNS, SSL, or connectivity issue. If you see a 401 in DevTools, verify your API allows browser CORS for this origin and accepts OPTIONS/POST requests.";
+        }
+        return `Reason: ${reason}`;
+    }
+
+    private getResponseMessage(body: string): string {
+        const trimmed = body.trim();
+        if (!trimmed) return "";
+
+        try {
+            const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+            const message =
+                (parsed.error_description as string | undefined)
+                ?? (parsed.error as string | undefined)
+                ?? (parsed.message as string | undefined);
+            return message ? `Server says: ${message}` : `Server says: ${trimmed.slice(0, 240)}`;
+        } catch {
+            return `Server says: ${trimmed.slice(0, 240)}`;
+        }
+    }
+
+    private getHttpStatusHint(status: number): string {
+        switch (status) {
+            case 400:
+                return "Check request payload and required fields.";
+            case 401:
+                return "Unauthorized. Verify credentials, appId/apiKey, and auth provider config.";
+            case 403:
+                return "Forbidden. The server understood the request but denied access.";
+            case 404:
+                return "Endpoint not found. Verify server route and base URL.";
+            case 429:
+                return "Rate limited by server. Retry after a delay.";
+            default:
+                return status >= 500 ? "Server error. Check backend logs for details." : "";
+        }
+    }
+
+    private withAuthContext<T>(operation: string, err: unknown, code: string): never {
+        if (err instanceof AuthError) {
+            throw new AuthError(
+                `${operation} failed. ${err.message}`,
+                err.code || code,
+                err.cause,
+                err.status
+            );
+        }
+
+        const message = err instanceof Error ? err.message : String(err);
+        throw new AuthError(`${operation} failed. ${message}`, code, err);
     }
 
     async getAuthTokenByCode({ code, session }: {
         code: string;
         session: StoredPKCEState;
     }) : Promise<AuthToken> {
-        const provider = this.getProvider(session.provider);
-        const clientId = this.getClientId(provider);
+        try {
+            const provider = this.getProvider(session.provider);
+            const clientId = this.getClientId(provider);
 
-        const tokenSet = await this.exchangeCode({
-            code,
-            session,
-            provider,
-            clientId,
-        })
+            const tokenSet = await this.exchangeCode({
+                code,
+                session,
+                provider,
+                clientId,
+            })
 
-        return tokenSet
+            return tokenSet
+        } catch (err) {
+            return this.withAuthContext("Get token by code", err, "TOKEN_EXCHANGE_FAILED");
+        }
 
     }
 
@@ -402,43 +479,46 @@ export class AuthGuard {
      * @param refreshToken The refresh token stored from a previous sign-in
      */
     async refreshAuthToken(providerId: ProviderId, refreshToken: string): Promise<RefreshResult> {
+        try {
+            const provider = this.getProvider(providerId);
+            const clientId = this.getClientId(provider);
+            const tokenUrl = this.requireEndpoint(provider.token_url, "token_url", provider.name);
 
-        const provider = this.getProvider(providerId);
-        const clientId = this.getClientId(provider);
-        const tokenUrl = this.requireEndpoint(provider.token_url, "token_url", provider.name);
-
-        const body = new URLSearchParams({
-            grant_type: "refresh_token",
-            refresh_token: refreshToken,
-            client_id: clientId,
-        });
-
-        // Note: Some providers (like GitHub) require client_secret for refreshes 
-        // if it's a private app, but for PKCE/Public clients, clientId is usually enough.
-        if (provider.clientSecret) {
-            body.set("client_secret", provider.clientSecret);
-        }
-
-        if (provider.tokenParams) {
-            Object.entries(provider.tokenParams).forEach(([key, value]) => {
-                body.set(key, value);
+            const body = new URLSearchParams({
+                grant_type: "refresh_token",
+                refresh_token: refreshToken,
+                client_id: clientId,
             });
-        }
 
-        const response = await this.fetchJSON<RefreshResult>(
-            tokenUrl,
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Accept": "application/json",
+            // Note: Some providers (like GitHub) require client_secret for refreshes 
+            // if it's a private app, but for PKCE/Public clients, clientId is usually enough.
+            if (provider.clientSecret) {
+                body.set("client_secret", provider.clientSecret);
+            }
+
+            if (provider.tokenParams) {
+                Object.entries(provider.tokenParams).forEach(([key, value]) => {
+                    body.set(key, value);
+                });
+            }
+
+            const response = await this.fetchJSON<RefreshResult>(
+                tokenUrl,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Accept": "application/json",
+                    },
+                    body: body.toString(),
                 },
-                body: body.toString(),
-            },
-            "TOKEN_REFRESH_FAILED"
-        );
+                "TOKEN_REFRESH_FAILED"
+            );
 
-        return response;
+            return response;
+        } catch (err) {
+            return this.withAuthContext("Refresh token", err, "TOKEN_REFRESH_FAILED");
+        }
     }
 
     /**
@@ -450,105 +530,188 @@ export class AuthGuard {
         return url.searchParams.has("code") || url.searchParams.has("error");
     }
 
-    async signInWithEmail(input: SignInWithEmailInput): Promise<AuthToken> {
-        const provider = this.getProvider(input.providerId);
-        const clientId = this.getClientId(provider);
-        const tokenUrl = this.requireEndpoint(provider.token_url, "token_url", provider.name);
+    async signInWithEmailAndPassword(input: SignInWithEmailAndPasswordInput): Promise<AuthToken> {
+        try {
+            const provider = this.getProvider(input.providerId);
+            const clientId = this.getClientId(provider);
+            const tokenUrl = this.requireEndpoint(provider.token_url, "token_url", provider.name);
 
-        const usernameField = provider.usernameField ?? "username";
-        const passwordField = provider.passwordField ?? "password";
+            const usernameField = provider.usernameField ?? "username";
+            const passwordField = provider.passwordField ?? "password";
 
-        const body = new URLSearchParams({
-            grant_type: provider.passwordGrantType ?? "password",
-            client_id: clientId,
-            [usernameField]: input.email,
-            [passwordField]: input.password,
-        });
-
-        const scope = input.scope?.join(" ") ?? this.resolveScopes(input.providerId, provider);
-        if (scope) {
-            body.set("scope", scope);
-        }
-
-        if (provider.clientSecret) {
-            body.set("client_secret", provider.clientSecret);
-        }
-
-        if (provider.tokenParams) {
-            Object.entries(provider.tokenParams).forEach(([key, value]) => {
-                body.set(key, value);
+            const body = new URLSearchParams({
+                grant_type: provider.passwordGrantType ?? "password",
+                client_id: clientId,
+                [usernameField]: input.email,
+                [passwordField]: input.password,
             });
-        }
 
-        const tokenResponse = await this.fetchJSON<Record<string, unknown>>(
-            tokenUrl,
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    Accept: "application/json",
+            const scope = input.scope?.join(" ") ?? this.resolveScopes(input.providerId, provider);
+            if (scope) {
+                body.set("scope", scope);
+            }
+
+            if (provider.clientSecret) {
+                body.set("client_secret", provider.clientSecret);
+            }
+
+            if (provider.tokenParams) {
+                Object.entries(provider.tokenParams).forEach(([key, value]) => {
+                    body.set(key, value);
+                });
+            }
+
+            const tokenResponse = await this.fetchJSON<Record<string, unknown>>(
+                tokenUrl,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        Accept: "application/json",
+                    },
+                    body: body.toString(),
                 },
-                body: body.toString(),
-            },
-            "EMAIL_SIGNIN_FAILED"
-        );
+                "EMAIL_SIGNIN_FAILED"
+            );
 
-        const parsed = this.parseTokenResponse(tokenResponse);
-        const profile = await this.fetchProfileIfAvailable(provider, parsed.access_token);
+            const parsed = this.parseTokenResponse(tokenResponse);
+            const profile = await this.fetchProfileIfAvailable(provider, parsed.access_token);
 
-        return {
-            ...parsed,
-            profile,
-            provider: input.providerId,
-        };
+            return {
+                ...parsed,
+                profile,
+                provider: input.providerId,
+            };
+        } catch (err) {
+            return this.withAuthContext("Sign-in with email/password", err, "EMAIL_SIGNIN_FAILED");
+        }
+    }
+
+    async createUserWithEmailAndPassword(input: CreateUserWithEmailAndPasswordInput): Promise<AuthToken> {
+        try {
+            const provider = this.getProvider(input.providerId);
+            const clientId = this.getClientId(provider);
+            const createUserUrl = this.requireEndpoint(
+                provider.createUserUrl ?? provider.token_url,
+                "createUserUrl or token_url",
+                provider.name
+            );
+
+            const emailField = provider.createUserEmailField ?? provider.usernameField ?? "username";
+            const passwordField = provider.createUserPasswordField ?? provider.passwordField ?? "password";
+
+            const body = new URLSearchParams({
+                grant_type: provider.createUserGrantType ?? provider.passwordGrantType ?? "password",
+                client_id: clientId,
+                [emailField]: input.email,
+                [passwordField]: input.password,
+            });
+
+            const scope = input.scope?.join(" ") ?? this.resolveScopes(input.providerId, provider);
+            if (scope) {
+                body.set("scope", scope);
+            }
+
+            if (provider.clientSecret) {
+                body.set("client_secret", provider.clientSecret);
+            }
+
+            if (provider.createUserParams) {
+                Object.entries(provider.createUserParams).forEach(([key, value]) => {
+                    body.set(key, value);
+                });
+            }
+
+            if (provider.tokenParams) {
+                Object.entries(provider.tokenParams).forEach(([key, value]) => {
+                    if (!body.has(key)) {
+                        body.set(key, value);
+                    }
+                });
+            }
+
+            if (input.additionalParams) {
+                Object.entries(input.additionalParams).forEach(([key, value]) => {
+                    body.set(key, value);
+                });
+            }
+
+            const tokenResponse = await this.fetchJSON<Record<string, unknown>>(
+                createUserUrl,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        Accept: "application/json",
+                    },
+                    body: body.toString(),
+                },
+                "EMAIL_CREATE_USER_FAILED"
+            );
+
+            const parsed = this.parseTokenResponse(tokenResponse);
+            const profile = await this.fetchProfileIfAvailable(provider, parsed.access_token);
+
+            return {
+                ...parsed,
+                profile,
+                provider: input.providerId,
+            };
+        } catch (err) {
+            return this.withAuthContext("Create user with email/password", err, "EMAIL_CREATE_USER_FAILED");
+        }
     }
 
     async signInAnonymously(input: SignInAnonymouslyInput): Promise<AuthToken> {
-        const provider = this.getProvider(input.providerId);
-        const clientId = this.getClientId(provider);
-        const tokenUrl = this.requireEndpoint(provider.token_url, "token_url", provider.name);
+        try {
+            const provider = this.getProvider(input.providerId);
+            const clientId = this.getClientId(provider);
+            const tokenUrl = this.requireEndpoint(provider.token_url, "token_url", provider.name);
 
-        const body = new URLSearchParams({
-            grant_type: provider.anonymousGrantType ?? "client_credentials",
-            client_id: clientId,
-        });
-
-        const scope = input.scope?.join(" ") ?? this.resolveScopes(input.providerId, provider);
-        if (scope) {
-            body.set("scope", scope);
-        }
-
-        if (provider.clientSecret) {
-            body.set("client_secret", provider.clientSecret);
-        }
-
-        if (provider.tokenParams) {
-            Object.entries(provider.tokenParams).forEach(([key, value]) => {
-                body.set(key, value);
+            const body = new URLSearchParams({
+                grant_type: provider.anonymousGrantType ?? "client_credentials",
+                client_id: clientId,
             });
-        }
 
-        const tokenResponse = await this.fetchJSON<Record<string, unknown>>(
-            tokenUrl,
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    Accept: "application/json",
+            const scope = input.scope?.join(" ") ?? this.resolveScopes(input.providerId, provider);
+            if (scope) {
+                body.set("scope", scope);
+            }
+
+            if (provider.clientSecret) {
+                body.set("client_secret", provider.clientSecret);
+            }
+
+            if (provider.tokenParams) {
+                Object.entries(provider.tokenParams).forEach(([key, value]) => {
+                    body.set(key, value);
+                });
+            }
+
+            const tokenResponse = await this.fetchJSON<Record<string, unknown>>(
+                tokenUrl,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        Accept: "application/json",
+                    },
+                    body: body.toString(),
                 },
-                body: body.toString(),
-            },
-            "ANONYMOUS_SIGNIN_FAILED"
-        );
+                "ANONYMOUS_SIGNIN_FAILED"
+            );
 
-        const parsed = this.parseTokenResponse(tokenResponse);
-        const profile = await this.fetchProfileIfAvailable(provider, parsed.access_token);
+            const parsed = this.parseTokenResponse(tokenResponse);
+            const profile = await this.fetchProfileIfAvailable(provider, parsed.access_token);
 
-        return {
-            ...parsed,
-            profile,
-            provider: input.providerId,
-        };
+            return {
+                ...parsed,
+                profile,
+                provider: input.providerId,
+            };
+        } catch (err) {
+            return this.withAuthContext("Anonymous sign-in", err, "ANONYMOUS_SIGNIN_FAILED");
+        }
     }
 
     async signInWithPhone(_input: SignInWithPhoneInput): Promise<never> {

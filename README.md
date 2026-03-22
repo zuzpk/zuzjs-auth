@@ -6,7 +6,8 @@ Secure OAuth2 for the modern web. Zero dependencies, maximum safety.
 ## Supported Flows
 
 - OAuth2/OIDC redirect flow via `auth.signIn(providerId)` + `auth.handleRedirect()`
-- Direct email/password token flow via `auth.signInWithEmail(...)`
+- Direct email/password token flow via `auth.signInWithEmailAndPassword(...)`
+- Create user + token flow via `auth.createUserWithEmailAndPassword(...)`
 - Anonymous token flow via `auth.signInAnonymously(...)`
 
 ## Built-in Providers

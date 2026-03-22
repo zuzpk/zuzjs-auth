@@ -10,13 +10,13 @@ import Twitter from "./twitter";
 
 export const Providers = {
     google: Google,
-  dropbox: Dropbox,
-  apple: Apple,
-  facebook: Facebook,
-  twitter: Twitter,
-  github: GitHub,
-  credentials: Credentials,
-  anonymous: Anonymous,
+    dropbox: Dropbox,
+    apple: Apple,
+    facebook: Facebook,
+    twitter: Twitter,
+    github: GitHub,
+    credentials: Credentials,
+    anonymous: Anonymous,
 }
 
 export function setupProvider(provider: any): OAuthProvider {
@@ -27,13 +27,13 @@ export function setupProvider(provider: any): OAuthProvider {
 }
 
 export {
-    Anonymous,
-    Apple,
-    Credentials,
-    Dropbox,
-    Facebook,
-    GitHub,
-    Google,
-    Twitter
+  Anonymous,
+  Apple,
+  Credentials,
+  Dropbox,
+  Facebook,
+  GitHub,
+  Google,
+  Twitter
 };
 

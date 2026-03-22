@@ -34,6 +34,16 @@ export interface OAuthProvider extends OAuthProviderParams {
   tokenParams?: Record<string, string>;
   /** Grant type to use for direct email/password sign-in. Defaults to "password". */
   passwordGrantType?: string;
+  /** Endpoint used to create a user via email/password. Defaults to token_url when omitted. */
+  createUserUrl?: string;
+  /** Grant type to use for create user flow. Defaults to passwordGrantType or "password". */
+  createUserGrantType?: string;
+  /** Field name used for email in create user body. Defaults to usernameField or "username". */
+  createUserEmailField?: string;
+  /** Field name used for password in create user body. Defaults to passwordField or "password". */
+  createUserPasswordField?: string;
+  /** Optional extra form fields added during create user requests. */
+  createUserParams?: Record<string, string>;
   /** Field name used for the email/username value in password grant body. Defaults to "username". */
   usernameField?: string;
   /** Field name used for the password value in password grant body. Defaults to "password". */
@@ -85,12 +95,23 @@ export interface AuthConfig {
 
 }
 
-export interface SignInWithEmailInput {
+export interface SignInWithEmailAndPasswordInput {
   providerId: ProviderId;
   email: string;
   password: string;
   scope?: string[];
 }
+
+export interface CreateUserWithEmailAndPasswordInput {
+  providerId: ProviderId;
+  email: string;
+  password: string;
+  scope?: string[];
+  additionalParams?: Record<string, string>;
+}
+
+/** @deprecated Use SignInWithEmailAndPasswordInput instead. */
+export type SignInWithEmailInput = SignInWithEmailAndPasswordInput;
 
 export interface SignInAnonymouslyInput {
   providerId: ProviderId;

@@ -21,6 +21,6 @@ export default defineConfig({
     return {};
   },
   onSuccess: async () => {
-    console.log('✅ ZuzJS Auth Manager Build Complete');
+    console.log('✅ ZuzJS Auth build complete');
   }
 });

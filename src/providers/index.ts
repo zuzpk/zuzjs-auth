@@ -1,4 +1,4 @@
-import { OAuthProvider } from "../types";
+import { OAuthProvider, OAuthProviderInput } from "../types";
 import Anonymous from "./anonymous";
 import Apple from "./apple";
 import Credentials from "./credentials";
@@ -19,7 +19,7 @@ export const Providers = {
     anonymous: Anonymous,
 }
 
-export function setupProvider(provider: any): OAuthProvider {
+export function setupProvider(provider: OAuthProviderInput): OAuthProvider {
   if (typeof provider === "function") {
     return provider();
   }

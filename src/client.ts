@@ -6,16 +6,18 @@ import {
     CreateUserWithEmailAndPasswordInput,
     NormalizedProfile,
     OAuthProvider,
+    PendingCodeExchange,
     ProviderId,
+    RedirectResult,
     RefreshResult,
     SignInAnonymouslyInput,
+    SignInOptions,
     SignInWithEmailAndPasswordInput,
     SignInWithPhoneInput,
     StoredPKCEState,
 } from "./types";
 
 const STORAGE_KEY_AUTH_STATE = "@zuzjs/auth:auth_state";
-const STORAGE_KEY_DISCOVERY_CACHE = "@zuzjs/auth:discovery";
 
 export class AuthError extends Error {
   constructor(
@@ -37,7 +39,9 @@ export class AuthGuard {
     constructor(config: AuthConfig) {
         this.config = {
             ...config,
+            // Keep the legacy default/behavior for existing consumers.
             fetchTokenInfoOnServer: config.fetchTokenInfoOnServer ?? true,
+            exchangeCodeInBrowser: config.exchangeCodeInBrowser ?? config.fetchTokenInfoOnServer ?? true,
             storageKey: config.storageKey ?? STORAGE_KEY_AUTH_STATE,
         };
         this.providers = new Map();
@@ -99,21 +103,48 @@ export class AuthGuard {
     }
 
     private parseTokenResponse(tokenResponse: Record<string, unknown>): Omit<AuthToken, "profile" | "provider"> {
-        const access_token = tokenResponse.access_token as string | undefined;
+        const access_token = this.optionalString(tokenResponse.access_token);
         if (!access_token) {
             throw new AuthError(
-                "Token exchange succeeded but no access_token was returned.",
+                "Token exchange succeeded but no string access_token was returned.",
                 "NO_ACCESS_TOKEN"
             );
         }
 
         return {
             access_token,
-            refresh_token: (tokenResponse.refresh_token as string) ?? null,
-            expires_in: (tokenResponse.expires_in as number) ?? null,
-            token_type: (tokenResponse.token_type as string) ?? "Bearer",
-            scope: (tokenResponse.scope as string) ?? null,
+            refresh_token: this.optionalString(tokenResponse.refresh_token) ?? null,
+            expires_in: this.optionalNumber(tokenResponse.expires_in) ?? null,
+            token_type: this.optionalString(tokenResponse.token_type) ?? "Bearer",
+            scope: this.optionalString(tokenResponse.scope) ?? null,
         };
+    }
+
+    private parseRefreshResponse(tokenResponse: Record<string, unknown>): RefreshResult {
+        const access_token = this.optionalString(tokenResponse.access_token);
+        const expires_in = this.optionalNumber(tokenResponse.expires_in);
+        if (!access_token || expires_in === undefined) {
+            throw new AuthError(
+                "Refresh response must include a string access_token and numeric expires_in.",
+                "INVALID_TOKEN_RESPONSE"
+            );
+        }
+
+        const refresh_token = this.optionalString(tokenResponse.refresh_token);
+        return {
+            access_token,
+            expires_in,
+            token_type: this.optionalString(tokenResponse.token_type) ?? "Bearer",
+            ...(refresh_token ? { refresh_token } : {}),
+        };
+    }
+
+    private optionalString(value: unknown): string | undefined {
+        return typeof value === "string" && value.length > 0 ? value : undefined;
+    }
+
+    private optionalNumber(value: unknown): number | undefined {
+        return typeof value === "number" && Number.isFinite(value) ? value : undefined;
     }
 
     private async fetchProfileIfAvailable(provider: OAuthProvider, accessToken: string): Promise<NormalizedProfile | null> {
@@ -126,12 +157,14 @@ export class AuthGuard {
     private saveSession(data: StoredPKCEState, returnTo?: string): void {
         try {
             sessionStorage.setItem(this.config.storageKey!, JSON.stringify(data));
-            if ( returnTo ) sessionStorage.setItem(`${this.config.storageKey!}-return-to`, returnTo);
+            const returnToKey = `${this.config.storageKey!}-return-to`;
+            if (returnTo) sessionStorage.setItem(returnToKey, returnTo);
+            else sessionStorage.removeItem(returnToKey);
         } catch {
-        throw new AuthError(
-            "Failed to write to sessionStorage. Ensure the browser allows storage.",
-            "STORAGE_WRITE_FAILED"
-        );
+            throw new AuthError(
+                "Failed to write to sessionStorage. Ensure the browser allows storage.",
+                "STORAGE_WRITE_FAILED"
+            );
         }
     }
 
@@ -144,7 +177,21 @@ export class AuthGuard {
             );
         }
         try {
-            return JSON.parse(raw) as StoredPKCEState;
+            const parsed = JSON.parse(raw) as Partial<StoredPKCEState>;
+            const verifier = this.optionalString(parsed.verifier);
+            const state = this.optionalString(parsed.state);
+            const provider = this.optionalString(parsed.provider);
+            const redirectUri = this.optionalString(parsed.redirectUri);
+            if (!verifier || !state || !provider || !redirectUri) {
+                throw new Error("Invalid PKCE state shape");
+            }
+            return {
+                verifier,
+                state,
+                provider,
+                redirectUri,
+                metaTag: this.optionalString(parsed.metaTag) ?? "",
+            };
         } catch {
             throw new AuthError(
                 "Corrupted PKCE session in sessionStorage.",
@@ -155,6 +202,18 @@ export class AuthGuard {
 
     private clearSession(): void {
         sessionStorage.removeItem(this.config.storageKey!);
+        sessionStorage.removeItem(`${this.config.storageKey!}-return-to`);
+    }
+
+    private normalizeReturnTo(returnTo: string): string {
+        if (!returnTo.startsWith("/") || returnTo.startsWith("//") || returnTo.includes("\\")) {
+            throw new AuthError("returnTo must be a same-origin application path.", "INVALID_RETURN_TO");
+        }
+        const target = new URL(returnTo, window.location.origin);
+        if (target.origin !== window.location.origin) {
+            throw new AuthError("returnTo must remain on the current origin.", "INVALID_RETURN_TO");
+        }
+        return `${target.pathname}${target.search}${target.hash}`;
     }
 
     private async exchangeCode(opts: {
@@ -175,13 +234,9 @@ export class AuthGuard {
             client_id: clientId,
         });
 
-        if (provider.clientSecret) {
-            body.set("client_secret", provider.clientSecret);
-        }
-
-        if (provider.pkce_supported) {
-            body.set("code_verifier", session.verifier);
-        }
+        // AuthGuard is browser-oriented: never send confidential client secrets.
+        // Exchange confidential-client codes on a backend instead.
+        body.set("code_verifier", session.verifier);
 
         if (provider.tokenParams) {
             Object.entries(provider.tokenParams).forEach(([key, value]) => {
@@ -298,10 +353,10 @@ export class AuthGuard {
             return {} as T;
         }
 
+        const text = await response.text().catch(() => "");
         try {
-            return (await response.json()) as T;
+            return JSON.parse(text) as T;
         } catch (parseErr) {
-            const text = await response.text().catch(() => "");
             const snippet = text ? ` Response body: ${text.slice(0, 240)}` : "";
             throw new AuthError(
                 `Failed to parse JSON response from ${url}.${snippet}`,
@@ -388,18 +443,26 @@ export class AuthGuard {
 
     }
 
-    async handleRedirect(autoRedirect: boolean = false): Promise<any> {
-
+    async handleRedirect(autoRedirect: boolean = false): Promise<RedirectResult | null> {
         const params = new URLSearchParams(window.location.search);
         const code = params.get("code");
+        const error = params.get("error");
         const state = params.get("state");
 
-        // Check if we are actually in a redirect flow
-        if (!code) return null;
+        // A page without OAuth callback parameters is not a callback.
+        if (!code && !error) return null;
 
-        const session = this.loadSession();
+        let session: StoredPKCEState;
+        try {
+            session = this.loadSession();
+        } catch (err) {
+            // An unsolicited provider error still needs a useful error result.
+            if (error && err instanceof AuthError && err.code === "SESSION_NOT_FOUND") {
+                throw new AuthError(`Provider returned an error: ${params.get("error_description") ?? error}`, "PROVIDER_ERROR", err);
+            }
+            throw err;
+        }
 
-        // CSRF verification
         if (!state || state !== session.state) {
             this.clearSession();
             throw new AuthError(
@@ -408,69 +471,47 @@ export class AuthGuard {
             );
         }
 
-        // Check for provider error response
-        const error = params.get("error");
+        this.cleanCallbackUrl();
+
         if (error) {
             const description = params.get("error_description") ?? error;
             this.clearSession();
-            throw new AuthError(
-                `Provider returned an error: ${description}`,
-                "PROVIDER_ERROR"
-            );
+            throw new AuthError(`Provider returned an error: ${description}`, "PROVIDER_ERROR");
         }
 
-        // Clean the URL immediately (remove code, state, etc.)
-        const cleanUrl = new URL(window.location.href);
-        cleanUrl.searchParams.delete("code");
-        cleanUrl.searchParams.delete("state");
-        cleanUrl.searchParams.delete("scope");
-        cleanUrl.searchParams.delete("error");
-        cleanUrl.searchParams.delete("error_description");
-        window.history.replaceState({}, "", cleanUrl.toString());
-
+        // code is guaranteed by the callback check above because error has returned.
         const provider = this.getProvider(session.provider);
-        const clientId = this.getClientId(provider);
-        
-        const returnTo = sessionStorage.getItem(`${this.config.storageKey!}-return-to`);
-        
-        let tokenSet : (AuthToken | { code: string; session: StoredPKCEState }) & {
-            returnTo: string | undefined;
-            metaTag: string | undefined;
-        };
+        const storedReturnTo = sessionStorage.getItem(`${this.config.storageKey!}-return-to`);
+        const returnTo = storedReturnTo ? this.normalizeReturnTo(storedReturnTo) : undefined;
+        const metaTag = session.metaTag || undefined;
 
-        if ( this.config.fetchTokenInfoOnServer === true ){
-    
-            tokenSet = {
-                ...(await this.exchangeCode({
-                    code,
-                    session,
-                    provider,
-                    clientId,
-                })),
-                returnTo: returnTo ?? undefined,
-                metaTag: session.metaTag ?? undefined
-            };
-
-        }
-        else{
-
-            tokenSet = {
-                code,
-                session,
-                returnTo: returnTo ?? undefined,
-                metaTag: session.metaTag ?? undefined
+        try {
+            let result: RedirectResult;
+            if (this.config.exchangeCodeInBrowser) {
+                const clientId = this.getClientId(provider);
+                result = {
+                    ...(await this.exchangeCode({ code: code!, session, provider, clientId })),
+                    returnTo,
+                    metaTag,
+                };
+            } else {
+                const pending: PendingCodeExchange = { code: code!, session, returnTo, metaTag };
+                result = pending;
             }
 
+            if (returnTo && autoRedirect) {
+                window.location.href = new URL(returnTo, window.location.origin).toString();
+            }
+            return result;
+        } finally {
+            this.clearSession();
         }
+    }
 
-        this.clearSession()
-
-        if (returnTo && autoRedirect === true) {
-            window.location.href = window.location.origin + returnTo;
-        }
-
-        return tokenSet
-
+    private cleanCallbackUrl(): void {
+        const cleanUrl = new URL(window.location.href);
+        ["code", "state", "scope", "error", "error_description"].forEach((key) => cleanUrl.searchParams.delete(key));
+        window.history.replaceState({}, "", cleanUrl.toString());
     }
 
     /**
@@ -490,19 +531,15 @@ export class AuthGuard {
                 client_id: clientId,
             });
 
-            // Note: Some providers (like GitHub) require client_secret for refreshes 
-            // if it's a private app, but for PKCE/Public clients, clientId is usually enough.
-            if (provider.clientSecret) {
-                body.set("client_secret", provider.clientSecret);
-            }
-
+            // Confidential-client refreshes belong on a backend; this browser flow
+            // deliberately never sends provider.clientSecret.
             if (provider.tokenParams) {
                 Object.entries(provider.tokenParams).forEach(([key, value]) => {
                     body.set(key, value);
                 });
             }
 
-            const response = await this.fetchJSON<RefreshResult>(
+            const response = await this.fetchJSON<Record<string, unknown>>(
                 tokenUrl,
                 {
                     method: "POST",
@@ -515,7 +552,7 @@ export class AuthGuard {
                 "TOKEN_REFRESH_FAILED"
             );
 
-            return response;
+            return this.parseRefreshResponse(response);
         } catch (err) {
             return this.withAuthContext("Refresh token", err, "TOKEN_REFRESH_FAILED");
         }
@@ -549,10 +586,6 @@ export class AuthGuard {
             const scope = input.scope?.join(" ") ?? this.resolveScopes(input.providerId, provider);
             if (scope) {
                 body.set("scope", scope);
-            }
-
-            if (provider.clientSecret) {
-                body.set("client_secret", provider.clientSecret);
             }
 
             if (provider.tokenParams) {
@@ -610,10 +643,6 @@ export class AuthGuard {
             const scope = input.scope?.join(" ") ?? this.resolveScopes(input.providerId, provider);
             if (scope) {
                 body.set("scope", scope);
-            }
-
-            if (provider.clientSecret) {
-                body.set("client_secret", provider.clientSecret);
             }
 
             if (provider.createUserParams) {
@@ -678,10 +707,6 @@ export class AuthGuard {
                 body.set("scope", scope);
             }
 
-            if (provider.clientSecret) {
-                body.set("client_secret", provider.clientSecret);
-            }
-
             if (provider.tokenParams) {
                 Object.entries(provider.tokenParams).forEach(([key, value]) => {
                     body.set(key, value);
@@ -730,18 +755,9 @@ export class AuthGuard {
     * @param options - Optional parameters, e.g. { returnTo: "/app" }
     *                  returnTo is the path within your app to return to after sign-in
     */
-    async signIn(
-        providerId: ProviderId,
-        options?: {
-            /** The path within your app to return to after sign-in */
-            returnTo?: string;
-            /** Optional meta tag to include in the sign-in request */
-            metaTag?: string;
-        }
-    ): Promise<any> {
-
-        // Capture the current sub-path
-        const returnTo = options?.returnTo || window.location.pathname;
+    async signIn(providerId: ProviderId, options?: SignInOptions): Promise<never> {
+        // Capture and validate the current same-origin application path.
+        const returnTo = this.normalizeReturnTo(options?.returnTo ?? window.location.pathname);
 
         const provider = this.getProvider(providerId);
         const authorizationUrl = this.requireEndpoint(provider.authorization_url, "authorization_url", provider.name);
@@ -763,11 +779,10 @@ export class AuthGuard {
             state,
         };
 
-        if (provider.pkce_supported) {
-            const challenge = await generateChallenge(verifier);
-            params.code_challenge = challenge;
-            params.code_challenge_method = "S256";
-        }
+        // PKCE S256 is mandatory for browser authorization-code flows.
+        const challenge = await generateChallenge(verifier);
+        params.code_challenge = challenge;
+        params.code_challenge_method = "S256";
 
         // Dropbox requires token_access_type for offline (refresh) tokens
         switch(providerId){

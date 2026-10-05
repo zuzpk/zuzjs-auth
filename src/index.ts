@@ -1,18 +1,25 @@
-export * from "./providers"
+export * from "./providers";
 
 export type {
+    AuthConfig,
     AuthToken,
     CreateUserWithEmailAndPasswordInput,
     NormalizedProfile,
     OAuthProvider,
+    OAuthProviderFactory,
+    OAuthProviderInput,
+    OAuthProviderParams,
+    PendingCodeExchange,
     ProviderId,
+    RedirectResult,
+    RefreshResult,
     SignInAnonymouslyInput,
+    SignInOptions,
     SignInWithEmailAndPasswordInput,
     SignInWithEmailInput,
-    SignInWithPhoneInput
-} from "./types"
+    SignInWithPhoneInput,
+    StoredPKCEState,
+} from "./types";
 
-export {
-    AuthGuard
-} from "./client"
-
+export { AuthError, AuthGuard } from "./client";
+export { ServerAuthGuard } from "./server";
